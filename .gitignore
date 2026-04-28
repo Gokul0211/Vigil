@@ -1,0 +1,8 @@
+.env
+logs/
+__pycache__/
+*.pyc
+.pytest_cache/
+server/gemini_client.py
+audit/verifier.py
+audit/dataset.py

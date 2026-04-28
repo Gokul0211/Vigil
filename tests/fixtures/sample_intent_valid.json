@@ -1,0 +1,7 @@
+{
+  "intent": "implementing checkout route with JWT auth check",
+  "reason": "core payment flow, auth required per brief",
+  "affects": ["auth", "data-exposure"],
+  "invariants_touched": [],
+  "assumes": ["JWT middleware active on /api/v1/ routes"]
+}

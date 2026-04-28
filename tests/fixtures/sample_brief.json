@@ -1,0 +1,22 @@
+{
+  "system_purpose": "Payment processing microservice for e-commerce platform.",
+  "trust_boundaries": [
+    {"label": "PUBLIC", "patterns": ["/api/v1/checkout", "/api/v1/products"]},
+    {"label": "AUTHENTICATED", "patterns": ["/api/v1/orders", "/api/v1/user/*"]},
+    {"label": "INTERNAL ONLY", "patterns": ["/api/internal/*", "/admin/*"]}
+  ],
+  "auth_model": "JWT-based. Middleware validates token on all /api/v1/ routes. /api/internal/ assumed to be behind VPC.",
+  "data_flows": [
+    "User input -> validation -> DB write (orders table)",
+    "Payment data -> never logged, never stored raw",
+    "PII fields: email, address, card_last4"
+  ],
+  "invariants": [
+    {"id": "no-pii-in-logs", "description": "Payment data must never appear in any log call", "satisfied": true},
+    {"id": "admin-role-required", "description": "/admin/* never reachable without role=admin claim", "satisfied": true},
+    {"id": "db-writes-sanitized", "description": "All DB writes sanitized before execution", "satisfied": true},
+    {"id": "rate-limit-public", "description": "Rate limiting on all public endpoints", "satisfied": true}
+  ],
+  "sensitive_operations": ["DB writes", "External payment API calls", "File system access", "Environment variable reads"],
+  "raw_markdown": ""
+}

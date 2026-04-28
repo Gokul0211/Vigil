@@ -1,0 +1,1 @@
+STRIPE_SECRET = "sk-prod-abc123xyz"
