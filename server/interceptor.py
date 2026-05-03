@@ -1,4 +1,5 @@
 import asyncio
+import os
 from models.intent import IntentMessage
 from models.verdict import Verdict, ToolCallResult
 from models.context_entry import ContextEntry
@@ -8,6 +9,17 @@ from server.context import ContextManager
 from server.classifier import classify
 from server.tier1 import analyze_sync
 from server.tier2 import analyze_async
+
+
+SEVERITY_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+
+def _get_min_block_severity() -> int:
+    """
+    Reads VIGIL_MIN_BLOCK_SEVERITY from env. Defaults to LOW (blocks everything).
+    Valid values: LOW, MEDIUM, HIGH, CRITICAL
+    """
+    raw = os.environ.get("VIGIL_MIN_BLOCK_SEVERITY", "LOW").upper()
+    return SEVERITY_RANK.get(raw, 1)
 
 
 class Interceptor:
@@ -23,6 +35,7 @@ class Interceptor:
         self.logger = logger
         self.session_id = session_id
         self.pending_block: Verdict | None = None   # deferred Tier 2 finding
+        self.pending_warning: Verdict | None = None  # deferred Tier 2 warning
 
     async def handle(
         self,
@@ -48,6 +61,14 @@ class Interceptor:
                 full_verdict=block,
             ))
             return self._format_deferred_block(block)
+
+        # Inject any pending warning (non-blocking)
+        deferred_warning_msg = None
+        if self.pending_warning:
+            warning = self.pending_warning
+            self.pending_warning = None
+            warning.injected_at = call_id
+            deferred_warning_msg = self._format_warn_message(warning, deferred=True)
 
         intent = IntentMessage(**intent_raw)
         diff = self._extract_diff(tool, params)
@@ -80,7 +101,8 @@ class Interceptor:
             self.context.append(entry)
             self.logger.log_tool_call(entry)
             self._execute(tool, params)
-            return "[Vigil] SKIP — not security relevant"
+            resp = "[Vigil] SKIP — not security relevant"
+            return f"{deferred_warning_msg}\n\n{resp}" if deferred_warning_msg else resp
 
         # Step 2: Tier 1 — sync, blocks current call
         tier1_verdict = analyze_sync(
@@ -89,15 +111,32 @@ class Interceptor:
         )
 
         if tier1_verdict.verdict == "CLEAR_BLOCK":
-            entry = ContextEntry(
-                call_id=call_id, tool=tool, file_path=file_path,
-                diff=diff, intent=intent, verdict="CLEAR_BLOCK",
-                full_verdict=tier1_verdict, malformed_intent=used_inference
-            )
-            self.context.append(entry)
-            self.logger.log_tool_call(entry)
-            # File is NOT written
-            return self._format_block_message(tier1_verdict)
+            min_rank = _get_min_block_severity()
+            finding_rank = SEVERITY_RANK.get(tier1_verdict.severity or "LOW", 1)
+
+            if finding_rank >= min_rank:
+                # Full block — do NOT execute file write
+                entry = ContextEntry(
+                    call_id=call_id, tool=tool, file_path=file_path,
+                    diff=diff, intent=intent, verdict="CLEAR_BLOCK",
+                    full_verdict=tier1_verdict, malformed_intent=used_inference
+                )
+                self.context.append(entry)
+                self.logger.log_tool_call(entry)
+                resp = self._format_block_message(tier1_verdict)
+                return f"{deferred_warning_msg}\n\n{resp}" if deferred_warning_msg else resp
+            else:
+                # Below threshold — WARN, execute the write
+                self._execute(tool, params)
+                entry = ContextEntry(
+                    call_id=call_id, tool=tool, file_path=file_path,
+                    diff=diff, intent=intent, verdict="WARN",
+                    full_verdict=tier1_verdict, malformed_intent=used_inference
+                )
+                self.context.append(entry)
+                self.logger.log_tool_call(entry)
+                resp = self._format_warn_message(tier1_verdict)
+                return f"{deferred_warning_msg}\n\n{resp}" if deferred_warning_msg else resp
 
         # CLEAR_PASS or AMBIGUOUS — write the file
         self._execute(tool, params)
@@ -113,12 +152,14 @@ class Interceptor:
         # Step 3: Tier 2 — async, runs in parallel
         if tier1_verdict.verdict == "AMBIGUOUS":
             asyncio.create_task(self._run_tier2(diff, intent, call_id))
-            return f"[Vigil] AMBIGUOUS — file written, deep analysis running in background (call #{call_id})"
+            resp = f"[Vigil] AMBIGUOUS — file written, deep analysis running in background (call #{call_id})"
+            return f"{deferred_warning_msg}\n\n{resp}" if deferred_warning_msg else resp
 
-        return "[Vigil] APPROVE"
+        resp = "[Vigil] APPROVE"
+        return f"{deferred_warning_msg}\n\n{resp}" if deferred_warning_msg else resp
 
     async def _run_tier2(self, diff: str, intent: IntentMessage, call_id: int):
-        """Runs Tier 2 async. Stores result in pending_block if BLOCK."""
+        """Runs Tier 2 async. Stores result in pending_block or pending_warning."""
         try:
             verdict = await analyze_async(
                 diff=diff,
@@ -128,17 +169,34 @@ class Interceptor:
                 call_id=call_id
             )
             if verdict.verdict == "BLOCK":
-                verdict.detected_at = call_id
-                self.pending_block = verdict
-                self.logger.log_tool_call(ContextEntry(
-                    call_id=call_id,
-                    tool="tier2_async_result",
-                    file_path="[async]",
-                    diff=diff,
-                    intent=intent,
-                    verdict="BLOCK",
-                    full_verdict=verdict,
-                ))
+                min_rank = _get_min_block_severity()
+                finding_rank = SEVERITY_RANK.get(verdict.severity or "LOW", 1)
+
+                if finding_rank >= min_rank:
+                    verdict.detected_at = call_id
+                    self.pending_block = verdict
+                    self.logger.log_tool_call(ContextEntry(
+                        call_id=call_id,
+                        tool="tier2_async_result",
+                        file_path="[async]",
+                        diff=diff,
+                        intent=intent,
+                        verdict="BLOCK",
+                        full_verdict=verdict,
+                    ))
+                else:
+                    # Below threshold — store as pending_warning instead
+                    verdict.detected_at = call_id
+                    self.pending_warning = verdict
+                    self.logger.log_tool_call(ContextEntry(
+                        call_id=call_id,
+                        tool="tier2_async_result",
+                        file_path="[async]",
+                        diff=diff,
+                        intent=intent,
+                        verdict="WARN",
+                        full_verdict=verdict,
+                    ))
         except Exception as e:
             # Tier 2 failure is non-fatal
             self.logger.log_malformed_intent(
@@ -161,6 +219,19 @@ class Interceptor:
         lines.append("The code from that call has already been written. You must address")
         lines.append("this finding before making any further changes. The current tool call")
         lines.append("has been halted until you resolve this.")
+        return "\n".join(lines)
+
+    def _format_warn_message(self, verdict: Verdict, deferred: bool = False) -> str:
+        prefix = "[Vigil] DEFERRED WARN" if deferred else "[Vigil] WARN"
+        lines = [
+            f"{prefix} — {verdict.severity or 'UNKNOWN'} severity (below block threshold)",
+            f"Finding: {verdict.finding or 'No details'}",
+        ]
+        if verdict.fix:
+            lines.append(f"Fix: {verdict.fix}")
+        if verdict.invariant_violated:
+            lines.append(f"Invariant: {verdict.invariant_violated}")
+        lines.append("File was written. Address this before the next commit.")
         return "\n".join(lines)
 
     def _format_block_message(self, verdict: Verdict) -> str:

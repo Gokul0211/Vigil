@@ -4,7 +4,7 @@ from typing import Literal
 # Tier 1 returns CLEAR_BLOCK / CLEAR_PASS / AMBIGUOUS
 # Tier 2 returns APPROVE / BLOCK
 # Classifier short-circuits with SKIP
-VerdictType = Literal["CLEAR_BLOCK", "CLEAR_PASS", "AMBIGUOUS", "APPROVE", "BLOCK", "SKIP"]
+VerdictType = Literal["CLEAR_BLOCK", "CLEAR_PASS", "AMBIGUOUS", "APPROVE", "BLOCK", "SKIP", "WARN"]
 SeverityLevel = Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] | None
 
 
@@ -27,6 +27,7 @@ class ToolCallResult(BaseModel):
     """
     allowed: bool
     blocked: bool = False
+    warned: bool = False          # True when finding is below block threshold
     deferred: bool = False        # True when injecting a pending Tier 2 block
     verdict: Verdict | None = None
     message: str = ""             # human-readable message returned to the agent

@@ -44,6 +44,7 @@ async def analyze_async(
 
         raw = response.content[0].text.strip()
         verdict = _parse_verdict(raw)
+        verdict = _validate_invariant(verdict, brief)
         verdict.detected_at = call_id
         return verdict
 
@@ -132,3 +133,15 @@ def _parse_verdict(raw: str) -> Verdict:
             verdict="APPROVE",
             finding="Tier 2 returned unparseable response. Defaulting to APPROVE.",
         )
+
+
+def _validate_invariant(verdict: Verdict, brief: ArchitectureBrief) -> Verdict:
+    """Clear invariant_violated if the ID doesn't exist in the brief."""
+    if not verdict.invariant_violated or not brief.invariants:
+        return verdict
+
+    valid_ids = [inv.id for inv in brief.invariants]
+    if verdict.invariant_violated not in valid_ids:
+        verdict.invariant_violated = None
+
+    return verdict

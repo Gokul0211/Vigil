@@ -38,7 +38,8 @@ def analyze_sync(
         )
 
         raw = response.content[0].text.strip()
-        return _parse_verdict(raw)
+        verdict = _parse_verdict(raw)
+        return _validate_invariant(verdict, brief)
 
     except Exception as e:
         # On any model failure, return AMBIGUOUS — never block on an error
@@ -105,3 +106,15 @@ def _parse_verdict(raw: str) -> Verdict:
             finding="Tier 1 returned unparseable response. Routing to Tier 2.",
             severity=None
         )
+
+
+def _validate_invariant(verdict: Verdict, brief: ArchitectureBrief) -> Verdict:
+    """Clear invariant_violated if the ID doesn't exist in the brief."""
+    if not verdict.invariant_violated or not brief.invariants:
+        return verdict
+
+    valid_ids = [inv.id for inv in brief.invariants]
+    if verdict.invariant_violated not in valid_ids:
+        verdict.invariant_violated = None
+
+    return verdict

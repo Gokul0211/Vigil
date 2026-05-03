@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from datetime import datetime
+import hashlib
 from models.context_entry import ContextEntry
 
 
@@ -24,11 +25,26 @@ class AuditLogger:
 
     def log_tool_call(self, entry: ContextEntry) -> None:
         """Append one tool-call record to the audit log."""
+        diff_bytes = entry.diff.encode("utf-8")
+        diff_hash = hashlib.sha256(diff_bytes).hexdigest()[:16]
+
+        # Write full diff to separate file if over preview threshold
+        full_diff_path = None
+        if len(entry.diff) > 600:
+            diff_dir = self.log_dir / "diffs"
+            diff_dir.mkdir(exist_ok=True)
+            diff_file = diff_dir / f"{self.session_id}_call{entry.call_id}_{diff_hash}.txt"
+            diff_file.write_text(entry.diff, encoding="utf-8")
+            full_diff_path = str(diff_file)
+
         record = {
             "event": "tool_call",
             "call_id": entry.call_id,
             "tool": entry.tool,
             "file": entry.file_path,
+            "diff_preview": entry.diff[:600],
+            "diff_hash": diff_hash,
+            "full_diff_path": full_diff_path,
             "intent": entry.intent.model_dump(),
             "verdict": entry.verdict,
             "malformed_intent": entry.malformed_intent,

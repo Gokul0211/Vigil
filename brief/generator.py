@@ -5,27 +5,116 @@ from pathlib import Path
 from brief.schema import ArchitectureBrief, SecurityInvariant, TrustBoundary
 
 
+class BriefQualityError(Exception):
+    """Raised when generated brief doesn't meet minimum quality thresholds."""
+    pass
+
+
+def validate_brief(brief: ArchitectureBrief) -> list[str]:
+    """
+    Validates brief quality. Returns list of issues found.
+    Empty list = brief is acceptable.
+    """
+    issues = []
+
+    if len(brief.invariants) < 2:
+        issues.append(
+            f"Only {len(brief.invariants)} invariant(s) defined. "
+            "Need at least 2 specific, falsifiable invariants. "
+            "Add more detail about what must ALWAYS be true in your system."
+        )
+
+    vague_invariant_patterns = [
+        "handle security", "be secure", "follow best practices",
+        "implement correctly", "ensure security", "handle correctly",
+        "be safe", "avoid vulnerabilities"
+    ]
+    for inv in brief.invariants:
+        desc_lower = inv.description.lower()
+        if any(p in desc_lower for p in vague_invariant_patterns):
+            issues.append(
+                f"Invariant '{inv.id}' is too vague: '{inv.description}'. "
+                "Invariants must be falsifiable assertions, e.g. "
+                "'Payment data must never appear in any log call'."
+            )
+
+    if not brief.trust_boundaries:
+        issues.append(
+            "No trust boundaries defined. "
+            "Specify which endpoints are PUBLIC, AUTHENTICATED, or INTERNAL ONLY."
+        )
+
+    if not brief.auth_model or len(brief.auth_model.strip()) < 20:
+        issues.append(
+            "Auth model is missing or too brief. "
+            "Describe how authentication and authorization work in your system."
+        )
+
+    vague_purpose_patterns = ["web app", "web application", "backend", "api", "service"]
+    purpose_lower = brief.system_purpose.lower().strip()
+    if len(purpose_lower) < 40:
+        issues.append(
+            "System purpose is too brief. "
+            "Describe what the system does, who uses it, and what data it handles."
+        )
+
+    return issues
+
+
 def _load_prompt() -> str:
     return Path("prompts/brief_generation.txt").read_text()
 
 
 async def generate_brief(project_prompt: str) -> ArchitectureBrief:
     """
-    Calls the reasoning model with the project prompt and parses the
-    returned markdown into a structured ArchitectureBrief.
+    Generates Architecture Brief. If quality validation fails, retries once
+    with an augmented prompt that includes the specific issues found.
     """
     system_prompt = _load_prompt()
+    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    response = client.messages.create(
-        model="claude-opus-4-5",  # reasoning model for Phase 1 brief generation
+    # First attempt
+    response = await client.messages.create(
+        model="claude-opus-4-5",
         max_tokens=2048,
         system=system_prompt,
-        messages=[{"role": "user", "content": project_prompt}],
+        messages=[{"role": "user", "content": project_prompt}]
     )
-
     raw_markdown = response.content[0].text
-    return _parse_brief(raw_markdown)
+    brief = _parse_brief(raw_markdown)
+
+    issues = validate_brief(brief)
+    if not issues:
+        return brief
+
+    # One retry with explicit quality requirements
+    issues_text = "\n".join(f"- {issue}" for issue in issues)
+    augmented_prompt = f"""{project_prompt}
+
+The previous brief had these quality issues that you must fix:
+{issues_text}
+
+Please regenerate the brief addressing all of these issues specifically.
+Invariants must be falsifiable assertions, not generic security advice."""
+
+    response2 = await client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=2048,
+        system=system_prompt,
+        messages=[{"role": "user", "content": augmented_prompt}]
+    )
+    raw_markdown2 = response2.content[0].text
+    brief2 = _parse_brief(raw_markdown2)
+
+    # Return second attempt regardless — don't block on quality
+    remaining_issues = validate_brief(brief2)
+    if remaining_issues:
+        print(f"[Vigil] Warning: Brief quality issues remain after retry:")
+        for issue in remaining_issues:
+            print(f"[Vigil]   - {issue}")
+        print("[Vigil] Proceeding with best available brief. Consider improving your VIGIL_PROJECT_PROMPT.")
+
+    return brief2
 
 
 def _parse_brief(markdown: str) -> ArchitectureBrief:

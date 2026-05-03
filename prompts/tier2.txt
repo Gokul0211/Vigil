@@ -15,6 +15,28 @@ Be specific in your findings. Reference call IDs from the session history. Refer
 
 If you see no issue, return APPROVE with brief notes.
 
+### Library-specific knowledge — apply this even if the brief has no explicit invariant:
+
+**XXE (XML External Entity):**
+- `lxml.etree.fromstring()`, `xml.etree.ElementTree.fromstring()`, `xml.sax.parseString()` called with user-supplied data are dangerous by default — external entity resolution is enabled unless explicitly disabled (`resolve_entities=False`, `defusedxml`). Flag as HIGH if user input reaches any XML parser.
+
+**SSRF (Server-Side Request Forgery):**
+- `requests.get(url)`, `httpx.get(url)`, `urllib.request.urlopen(url)` where `url` originates from `request.args`, `request.body`, `request.form`, or any user-controlled source is SSRF. Flag as HIGH even if the brief has no explicit invariant.
+
+**Path traversal:**
+- `open(path)`, `send_file(path)`, `os.path.join(base, user_input)` where any path component comes from user input must be flagged — `../` traversal is trivial. Flag as HIGH.
+
+**Unsafe deserialization:**
+- `pickle.loads()`, `marshal.loads()`, `yaml.load()` (not `yaml.safe_load()`) with user-controlled input is always RCE-class. Flag as CRITICAL.
+
+Pay special attention to combinations of user-controlled input (request.args, request.body, request.form, request.data) passed to any of the above. Cross-reference the session history to trace where input originates.
+
+INVARIANT GROUNDING RULE: You may only set invariant_violated to an invariant ID that
+appears verbatim in the Architecture Brief above. Do not infer, paraphrase, or guess
+invariant IDs. If the finding does not clearly violate a specific named invariant, set
+invariant_violated to null. A finding with null invariant_violated is still valid and
+will still block — do not fabricate an invariant ID just to populate the field.
+
 Respond ONLY in valid JSON, no markdown, no explanation outside the JSON:
 {
   "verdict": "APPROVE" | "BLOCK",
